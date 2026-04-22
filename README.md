@@ -20,6 +20,7 @@ deliberately deferred.
 |------|-------------|
 | [`docs/vision.md`](docs/vision.md) | What Nebulanote is, core principles, scenarios, non-goals, and parked open questions. Read first. |
 | [`docs/data-model.md`](docs/data-model.md) | Logical data model — entities, fields, key decisions. Draft. |
+| [`docs/storage.md`](docs/storage.md) | Physical storage layout — blob store on disk, metadata store, per-platform data root. Draft. |
 
 ## Relationship to Spacenote
 

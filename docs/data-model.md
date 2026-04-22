@@ -51,9 +51,9 @@ types and inline comments.
 - **A Note's content is a single string with inline Resource refs.**
   The note has one `content` field. Resources are referenced inline
   via markers of the form `{{kind:<resource-uuid>}}` (e.g.
-  `{{image:abc…}}`, `{{voice:def…}}`). This makes ordering and
+  `{{image:abc…}}`, `{{audio:def…}}`). This makes ordering and
   interleaving expressible by the user (*"at the gym
-  `{{image:before}}` did squats `{{voice:grunt}}` `{{image:after}}`"*),
+  `{{image:before}}` did squats `{{audio:grunt}}` `{{image:after}}`"*),
   mirrors how Markdown / Obsidian / Notion already work, and keeps
   the Note schema tiny.
 - **The Note does not carry an attachments list.** The set of
@@ -74,12 +74,19 @@ types and inline comments.
   Resources whose referencing notes all become deleted are flagged as
   orphan cleanup candidates. They are *not* auto-deleted — user
   reviews and decides.
-- **Resource metadata is partly typed, partly free-form.** A small
-  core is typed (`kind`, `mime`, `blob_hash`, `size_bytes`,
-  timestamps). Everything kind-specific (dimensions, duration, EXIF,
-  OCR text, AI-generated descriptions, page counts, transcripts, …)
-  lives in a `meta: dict[str, Any]` field, with per-kind conventions
-  documented in prose rather than forced into the type system.
+- **Resource is minimal; kind-specific data splits by lifecycle.**
+  The Resource record carries only universal fields (id, lifecycle
+  timestamps, `kind`, `mime`, `blob_hash`, `size_bytes`,
+  `source_device`) plus an embedded `capture` block. Capture is a
+  typed, 1:1, kind-specific structure holding only what the file
+  itself reveals at upload (dimensions, duration, codec, page
+  count, …) — no AI, no network. Data derived **later** — AI
+  transcripts, OCR, descriptions, embeddings, summaries — lives in
+  separate **Enrichment** records (0..N per Resource), joined by
+  `resource_id`. Capture is embedded because it is tiny, always
+  needed, and immutable after upload; Enrichments are separate
+  because they can be bulky, not always needed, append-only, and
+  grow unboundedly as AI capabilities are added.
 - **Tags are plain strings on the note.** Normalized to lowercase, no
   hierarchy, free-form. Simple and fast. Added manually by the user
   or suggested by AI.
@@ -123,13 +130,13 @@ into the narrative by reference, not by position in a list.
 {{kind:<resource-uuid>}}
 ```
 
-Where `kind` is one of `image`, `voice`, `video`, `file`, matching
-the referenced Resource's `kind`. Examples:
+Where `kind` is one of `image`, `audio`, `video`, `document`,
+matching the referenced Resource's `kind`. Examples:
 
 ```
 Trying a new recipe today {{image:3f1a…}} — smelled great.
-{{voice:9b2c…}}
-Test results from today {{file:1d4e…}} will chat with the doctor tomorrow.
+{{audio:9b2c…}}
+Test results from today {{document:1d4e…}} will chat with the doctor tomorrow.
 ```
 
 **Invariants:**
@@ -154,7 +161,7 @@ Notes (today's entry, a weekly summary, a yearly retrospective).
 class Resource(BaseModel):
     id: UUID  # UUIDv7 — used in note markers like {{image:<id>}}
     created_at: datetime  # when the resource was added to the system
-    updated_at: datetime  # last time meta was updated (e.g. AI enrichment)
+    updated_at: datetime  # last time the core record was touched
     deleted_at: datetime | None  # soft-delete tombstone; None means live
 
     kind: Literal["image", "audio", "video", "document"]  # coarse class
@@ -162,26 +169,96 @@ class Resource(BaseModel):
     blob_hash: str  # SHA-256 hex of the file bytes; key into the blob store
     size_bytes: int  # file size in bytes
 
-    meta: dict[str, Any]  # kind-specific metadata; see conventions below
+    capture: ImageCapture | AudioCapture | VideoCapture | DocumentCapture | None
+    # ^ embedded kind-specific metadata from the file itself; None if unparsable
 
     source_device: str | None  # short label of the device that captured this
 ```
 
-`meta` is deliberately free-form `dict[str, Any]` because what lives
-in it varies per kind and will grow as features (AI analysis, OCR,
-transcription, …) are added. Conventions, not types:
+The Resource record holds only universal fields plus an embedded
+`capture` block. AI-derived data lives **outside** the Resource, in
+separate Enrichment records (see below).
 
-- **image** — `width`, `height`, `exif` (sub-dict), `ai_description`,
-  `ai_tags`, `filename`.
-- **audio** — `duration_ms`, `transcript`, `ai_summary`, `filename`.
-- **video** — `duration_ms`, `width`, `height`, `transcript`,
-  `ai_summary`, `filename`.
-- **document** — `filename`, `pages`, `ocr_text`, `ai_summary`.
+### Per-kind capture records
 
-Any of these may be absent. AI-derived fields appear only after an
-analysis runs. Trade-off noted: `dict[str, Any]` gives up mypy
-coverage over meta in exchange for evolvability; we can promote hot
-keys to typed sub-models later if warranted.
+Each capture record carries what the file itself reveals at upload
+time — synchronous, no AI, no network, no user input. One of the four
+types is embedded on a Resource based on its `kind`.
+
+```python
+class ImageCapture(BaseModel):
+    width: int  # pixels
+    height: int  # pixels
+    exif: dict[str, Any] | None  # raw EXIF dict if the file carries it
+
+class AudioCapture(BaseModel):
+    duration_ms: int  # length in milliseconds
+    codec: str | None  # short codec label (e.g. "aac", "opus")
+
+class VideoCapture(BaseModel):
+    duration_ms: int  # length in milliseconds
+    width: int  # pixels
+    height: int  # pixels
+    codec: str | None  # short codec label (e.g. "h264", "av1")
+
+class DocumentCapture(BaseModel):
+    filename: str | None  # original filename from upload, if known
+    page_count: int | None  # for paginated documents (e.g. PDF)
+```
+
+If a file cannot be parsed (corrupt header, unknown format),
+`Resource.capture` is `None` and the UI falls back to "unknown" for
+those fields. The Resource itself is still valid — we have its blob,
+its size, its MIME. Capture is best-effort, not an invariant.
+
+`ImageCapture.exif` is intentionally `dict[str, Any]` because EXIF is
+a bag of camera-defined keys whose set we cannot usefully pre-type.
+
+### Enrichment
+
+Data derived about a Resource *after* capture — typically by an AI
+pipeline, though manual annotations fit the same shape. Enrichments
+live in their own collection, one record per derived item, joining
+back to Resource via `resource_id`.
+
+```python
+class Enrichment(BaseModel):
+    id: UUID  # UUIDv7
+    resource_id: UUID  # FK to Resource.id
+    created_at: datetime  # when this enrichment was produced
+    kind: str  # "transcript", "ocr", "description", "tags", "embedding", "summary", ...
+    generator: str  # "whisper-large-v3", "gpt-4o-2025-xx", "manual", "tesseract-5", ...
+    content: dict[str, Any]  # kind-specific payload; shape varies by `kind`
+```
+
+`content` is deliberately `dict[str, Any]` because the set of
+enrichment kinds will grow as new AI capabilities are added, and each
+has its own natural shape (a transcript has `text` and `language`; an
+embedding has `vector` and `dim`; an OCR result may carry per-page
+text). Pre-typing the full matrix up front would be premature.
+Specific kinds can be promoted to typed sub-models once their shape
+stabilizes and they are read frequently.
+
+**Why Enrichments sit beside Resource, not inside it:**
+
+- Stream view (render many Resources as thumbnails) must not pull
+  heavy enrichments like embedding vectors (~6 KB each, several per
+  Resource over time).
+- Resource records stay small and stable; Enrichment count grows per
+  Resource over time as AI capabilities are added.
+- New AI runs are clean INSERTs — no array mutation on Resource
+  under concurrency.
+- Each Enrichment syncs across devices as its own record, not as
+  part of a reshuffled Resource document.
+- Full-text indexes on `content.text` and vector indexes on
+  embeddings live naturally on a dedicated Enrichment collection.
+
+**Accessing "everything about a Resource":**
+
+When code needs a Resource plus all of its Enrichments (e.g., to
+render a detail view or to feed an AI assistant with context), the
+service layer runs two queries and composes a view object in memory.
+This composite is not persisted — it is a convenience, not an entity.
 
 ### Capture and resource lifecycle
 
@@ -205,17 +282,19 @@ keys to typed sub-models later if warranted.
 
 A blob is just file bytes addressed by their SHA-256 hash. Blobs are
 not a pydantic model because they are not a structured record — they
-live in a separate blob store (filesystem, object store, or whatever
-we pick later). Resources reference blobs exclusively through
-`Resource.blob_hash`.
+live in a separate content-addressed blob store on the filesystem.
+Resources reference blobs exclusively through `Resource.blob_hash`.
+Physical layout (paths, sharding, atomic writes, garbage collection)
+is defined in [`storage.md`](storage.md).
 
-Two consequences worth noting:
+Two consequences worth noting at the data-model level:
 
 - If the same file is added twice (same bytes), the two Resource
-  records both point to the same blob — no duplication of bytes.
-- Deleting a Resource does not delete the blob directly. Blob garbage
-  collection runs separately once no live Resource references a
-  blob.
+  records both point to the same blob — bytes are deduplicated for
+  free.
+- Deleting a Resource does not delete the blob directly. Blob
+  garbage collection runs separately once no live Resource
+  references a blob.
 
 ## What we are not modeling yet
 
@@ -231,10 +310,13 @@ Deferred to later documents; listed here so we notice what is missing.
 - **Sharing state.** Public / password-protected visibility of
   individual notes. Needs its own record (share links, passwords,
   expirations).
-- **AI-derived data shape.** We've committed to "AI output lives in
-  `Resource.meta`" as a home, but not to the exact keys, update
-  cadence, or whether bulky outputs (embeddings, long transcripts)
-  should live in a sidecar index instead of inline on the Resource.
+- **Enrichment content schemas.** The Enrichment record has a typed
+  shell (`id`, `resource_id`, `kind`, `generator`, `created_at`) and
+  a free-form `content: dict[str, Any]`. The per-kind payload
+  schemas (what fields "transcript" has, what "embedding" looks
+  like, what "ocr" contains) are deliberately deferred until the AI
+  pipelines start running — committing shapes on paper would be
+  guessing.
 - **Links between notes.** Mentioning another note, quoting it,
   citing a source.
 - **Location metadata** at the note level. Photos already carry EXIF
@@ -248,6 +330,15 @@ Deferred to later documents; listed here so we notice what is missing.
   Alternatives worth considering: `[[kind:<uuid>]]` (wiki style),
   short per-note ids (`{{image:p1}}`) for editable readability instead
   of raw UUIDs. Final call deferred.
+- **Enrichment cardinality per `(resource_id, kind)`.** Allow many
+  (keep old transcripts side-by-side when regenerated with a newer
+  model, for comparison) or enforce "latest wins"? The record shape
+  supports both; policy is deferred.
+- **Fallback `kind`** for files that aren't image / audio / video /
+  document (spreadsheets, text files, archives, unknown binaries).
+  Add a catch-all `"file"` kind with a minimal capture, or reject
+  unknown formats at upload? The current four are committed; the
+  fallback is open.
 - **Escape rule** for writing a literal `{{…}}` in `content`. Rare
   case; postpone until someone hits it.
 - Should **content** support lightweight markup (markdown) within the
