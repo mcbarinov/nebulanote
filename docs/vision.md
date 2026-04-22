@@ -5,7 +5,7 @@ person wants to keep — text notes, voice memos, photos, videos, documents —
 as a simple stream of entries, with optional later refinement by the user
 or an AI agent.
 
-## What nebulanote is
+## What Nebulanote is
 
 A single place where one person collects all their own content, from any
 device they use, with the lowest possible friction at the moment of
@@ -13,7 +13,7 @@ capture. The data belongs to the user, not to a cloud service. Structure
 and meaning are added later, on demand — never as a precondition for
 writing something down.
 
-## How it differs from spacenote
+## How it differs from Spacenote
 
 Spacenote is a structured, schema-first note system for small teams. Every
 note lives in a space, follows a set of fields, and has a predefined
@@ -28,8 +28,8 @@ even a type.
 - Spacenote is a filing cabinet. Nebulanote is an inbox.
 
 The two systems are independent and each works on its own. They can
-optionally interoperate: a refined nebulanote entry may be promoted into
-a structured spacenote note.
+optionally interoperate: a refined Nebulanote entry may be promoted into
+a structured Spacenote note.
 
 ## Core principles
 
@@ -45,15 +45,15 @@ a structured spacenote note.
    in the future new surfaces such as smart speakers. Content captured
    anywhere merges into the same personal stream.
 5. **Every client is optional.** Someone who only wants the mobile app
-   should be able to use nebulanote as a self-contained mobile app. No
+   should be able to use Nebulanote as a self-contained mobile app. No
    single client is required for the system to work.
 6. **AI is optional but central to the design.** The system is built so
    an AI agent can read, search, organize, and answer questions over the
    stream. The user chooses whether to use a local model, a cloud model,
    or no AI at all.
-7. **Optional spacenote integration.** Nebulanote works perfectly well
-   without spacenote. When connected, refined entries can graduate into
-   spacenote notes.
+7. **Optional Spacenote integration.** Nebulanote works perfectly well
+   without Spacenote. When connected, refined entries can graduate into
+   Spacenote notes.
 
 ## The stream-to-curation lifecycle
 
@@ -65,7 +65,7 @@ Later, manually or with AI help, entries can be:
 - **Grouped** — e.g. ten fragments about today's workout collapsed into
   one summary entry that lists them.
 - **Refined** — e.g. a rough voice memo turned into a clean note.
-- **Promoted** into a spacenote note, when structure is wanted.
+- **Promoted** into a Spacenote note, when structure is wanted.
 - **Deleted**, once their content has been folded into something richer.
 
 Raw capture is cheap. Curation is a separate, later, and entirely
@@ -93,7 +93,7 @@ without exposing the rest of the stream.
 
 - Multi-user collaboration or shared workspaces.
 - Schema-first data entry.
-- Replacing spacenote or duplicating its structured-notes role.
+- Replacing Spacenote or duplicating its structured-notes role.
 - Being a cloud-only service the user cannot run independently.
 
 ## Open questions
@@ -107,6 +107,6 @@ specific answer to any of them.
 - **Entry atomicity**: is one entry a single media item, or a message
   with text plus multiple attachments?
 - **AI model selection** and the privacy boundary for cloud models.
-- **Graduation semantics** to spacenote: one-way export, linked copy,
+- **Graduation semantics** to Spacenote: one-way export, linked copy,
   or two-way sync.
 - **Sharing mechanics**: hosting, URL format, expiration, passwords.

@@ -18,14 +18,15 @@ deliberately deferred.
 
 | File | Description |
 |------|-------------|
-| [`docs/vision.md`](docs/vision.md) | What nebulanote is, core principles, scenarios, non-goals, and parked open questions. Read first. |
+| [`docs/vision.md`](docs/vision.md) | What Nebulanote is, core principles, scenarios, non-goals, and parked open questions. Read first. |
+| [`docs/data-model.md`](docs/data-model.md) | Logical data model — entities, fields, key decisions. Draft. |
 
 ## Relationship to Spacenote
 
-Nebulanote is a separate project from [spacenote](https://github.com/mcbarinov/spacenote). The two
+Nebulanote is a separate project from [Spacenote](https://github.com/mcbarinov/spacenote). The two
 are independent and each works on its own. Spacenote is a structured,
 schema-first note system for small teams. Nebulanote is a free-form
 personal inbox for one user. They can optionally interoperate: a refined
-nebulanote entry may be promoted into a structured spacenote note.
+Nebulanote entry may be promoted into a structured Spacenote note.
 
 See `docs/vision.md` for the full comparison.
