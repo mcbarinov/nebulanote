@@ -76,8 +76,8 @@ types and inline comments.
   reviews and decides.
 - **Resource is minimal; kind-specific data splits by lifecycle.**
   The Resource record carries only universal fields (id, lifecycle
-  timestamps, `kind`, `mime`, `blob_hash`, `size_bytes`,
-  `source_device`) plus an embedded `capture` block. Capture is a
+  timestamps, `kind`, `mime`, `blob_hash`, `size_bytes`, provenance
+  `meta`) plus an embedded `capture` block. Capture is a
   typed, 1:1, kind-specific structure holding only what the file
   itself reveals at upload (dimensions, duration, codec, page
   count, …) — no AI, no network. Data derived **later** — AI
@@ -90,6 +90,15 @@ types and inline comments.
 - **Tags are plain strings on the note.** Normalized to lowercase, no
   hierarchy, free-form. Simple and fast. Added manually by the user
   or suggested by AI.
+- **Provenance lives in a `meta: dict[str, Any]` bag, not typed
+  fields.** Both `Note` and `Resource` carry a `meta` dict scoped
+  strictly to provenance / capture context: where the record came
+  from, what produced it, context at capture time. `meta` is **not**
+  a general dumping ground — content, annotations, tags, AI outputs,
+  and anything with (or eligible for) its own entity in the model
+  have their own homes and do not go in `meta`. Conventional keys
+  (`source_device`, `generator`, `imported_from`, …) are documented
+  in prose, not typed, so the set can grow without schema changes.
 - **Blobs are content-addressed.** A separate blob store holds file
   bytes keyed by SHA-256. Resources reference blobs by hash only.
 
@@ -110,7 +119,7 @@ class Note(BaseModel):
     content: str  # free-form text with inline refs like {{image:<resource-uuid>}}
     tags: list[str]  # lowercase tag strings, unique within the note
 
-    source_device: str | None  # short label of the device that captured this
+    meta: dict[str, Any]  # provenance-only bag; see Provenance metadata below
 ```
 
 Notes are ordered by `created_at` in the stream view (equivalent to
@@ -172,7 +181,7 @@ class Resource(BaseModel):
     capture: ImageCapture | AudioCapture | VideoCapture | DocumentCapture | None
     # ^ embedded kind-specific metadata from the file itself; None if unparsable
 
-    source_device: str | None  # short label of the device that captured this
+    meta: dict[str, Any]  # provenance-only bag; see Provenance metadata below
 ```
 
 The Resource record holds only universal fields plus an embedded
@@ -277,6 +286,53 @@ This composite is not persisted — it is a convenience, not an entity.
   entered the system; `Note.created_at` is when the writing happened.
   A recent Note may reference an old Resource; UIs must not conflate
   the two timestamps.
+
+### Provenance metadata (`meta`)
+
+Both `Note` and `Resource` carry a `meta: dict[str, Any]` field. It
+is a **provenance bag** and nothing else — a single, flat dictionary
+of optional contextual information about how the record came into
+the system.
+
+**Strict scope rule.** `meta` is reserved for provenance / capture
+context. It is **not** a place to store:
+
+- Content the user wrote → goes in `Note.content`.
+- Human comments → goes in a `Comment` entity (future).
+- Structured machine analyses → goes in `Annotation` / `Enrichment`.
+- Tags → goes in `tags`.
+- Anything that has, or could reasonably have, its own entity in
+  the model.
+
+If a field is tempting to put in `meta` but describes *what the
+record is* rather than *where it came from*, it belongs elsewhere.
+
+**Conventional keys** (documented here, not typed; the list grows
+by convention, not by schema change):
+
+| Key | When present | Example value |
+|---|---|---|
+| `source_device` | Captured on a client device. | `"pixel-8"`, `"macbook-m"` |
+| `generator` | Record was produced by an agent, not a human. | `"health-aggregator-v1"` |
+| `imported_from` | Record came from a bulk import. | `"apple-notes-export-2026-01"` |
+| `client_version` | (future) Client build that created it, useful for bug reports. | `"1.4.2"` |
+| `location` | (future) GPS at capture, if the user opts in. | `{"lat": 55.7, "lon": 37.6}` |
+
+Any key may be absent. Unknown keys are ignored rather than rejected,
+so an older client can still read records written by a newer one.
+
+**Why a dict and not typed fields.** Provenance is an open-ended set
+of optional signals; most are `None` on most records. Typing each as
+a nullable column clutters the core entity with fields that the hot
+paths never read. A dict keeps the core records tidy and lets new
+provenance signals be added by writing them down here, not by
+altering the schema.
+
+**Trade-off named.** We give up static typing over provenance keys.
+Code that reads `meta["generator"]` is not checked by mypy. This is
+acceptable because provenance is used for UI decoration, filtering,
+and debugging — not for correctness-critical paths. If a specific
+key becomes load-bearing, it can be promoted to a typed field later.
 
 ### Blob (storage concept, not a modeled record)
 
