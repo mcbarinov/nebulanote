@@ -1,113 +1,75 @@
 # Nebulanote Data Model
 
-> Status: draft. Describes the **logical** data model. Storage engine,
-> sync protocol, indexing, and persistence format are deliberately
-> deferred — see *Open Questions*.
-
-## Scope
-
-This document defines the entities, fields, and relationships that make
-up a user's Nebulanote data. It does **not** pick a database, a file
-format, or a sync mechanism. Those will be separate documents once the
-shape is settled.
-
-Models are written as pydantic skeletons for clarity. They are
-design-time schemas, not runtime code — no validators, no methods, just
-types and inline comments.
+> Draft. Describes the **logical** data model. Storage engine, sync
+> protocol, indexing, and persistence format are deferred to other
+> docs. Models below are pydantic skeletons — types and inline
+> comments only, no validators or methods.
 
 ## Design principles
 
-1. **Multi-device by birth.** Every record gets a **UUIDv7** at the
-   moment it is created on any device. UUIDv7 encodes a millisecond
-   creation timestamp in its high bits plus randomness in the low
-   bits, so ids are globally unique across devices *and* sort
-   lexicographically by creation time. No sequential or
-   device-dependent IDs.
-2. **Two kinds of records, one stream.** A **Note** is the user's
-   expression (what they wrote); a **Resource** is the file-shaped
-   thing they captured or collected (photo, voice memo, video, PDF,
-   …). Notes reference Resources by id; Resources live on their own
-   and can be referenced by many Notes.
-3. **Large content lives outside records.** Notes and Resources are
-   small structured records. Actual file bytes live in a separate
-   content-addressed blob store and are referenced by hash.
-4. **Content-addressed blobs.** Files are identified by the hash of
-   their bytes (SHA-256). Same bytes → same ID, so uploading the same
-   photo twice costs nothing extra, and syncing can skip blobs another
-   device already has.
-5. **Soft delete.** Deletion is marked, not erased, so it can propagate
-   to other devices during merge. Actual garbage collection of
-   tombstones and orphaned blobs is a separate later concern.
-6. **Minimal required fields.** Capture is supposed to be effortless,
-   so the bare minimum for a valid note is very small.
+1. **Multi-device by birth.** Every record gets a **UUIDv7** at
+   creation on any device — globally unique and sortable by
+   creation time.
+2. **Two kinds of records.** A **Note** is what the user wrote; a
+   **Resource** is a file-shaped thing they captured (photo, voice
+   memo, video, document). Notes reference Resources by id;
+   Resources live on their own and can be referenced by many Notes.
+3. **Large content lives outside records in a content-addressed
+   blob store.** Notes and Resources are small structured records.
+   File bytes live separately, keyed by SHA-256. Same bytes → same
+   id, so dedup is free and sync can skip blobs another device
+   already has.
+4. **Soft delete.** Deletion is marked, not erased, so it
+   propagates to other devices during merge. GC of tombstones and
+   orphaned blobs is a separate later concern.
+5. **Minimal required fields.** Capture must be effortless; the
+   minimum for a valid note is small.
 
 ## Key decisions
 
-- **Two top-level entities: `Note` and `Resource`.** A Note is what
-  the user wrote; a Resource is a file-shaped thing they captured
-  (photo, voice memo, video, document). Notes reference Resources by
-  id; Resources stand on their own and can be referenced by many
-  Notes.
 - **A Note's content is a single string with inline Resource refs.**
-  The note has one `content` field. Resources are referenced inline
-  via markers of the form `{{kind:<resource-uuid>}}` (e.g.
-  `{{image:abc…}}`, `{{audio:def…}}`). This makes ordering and
-  interleaving expressible by the user (*"at the gym
-  `{{image:before}}` did squats `{{audio:grunt}}` `{{image:after}}`"*),
-  mirrors how Markdown / Obsidian / Notion already work, and keeps
-  the Note schema tiny.
+  One `content` field. Resources are referenced inline via markers of
+  the form `{{kind:<resource-uuid>}}`. Ordering and interleaving are
+  expressed by position in the string — no separate attachments list.
 - **The Note does not carry an attachments list.** The set of
-  Resources a Note references is derived by parsing its content
-  string. Storage-level indexes for reverse lookup (*"which notes
-  reference this Resource?"*) are a later concern, not a data-model
-  field.
-- **Content must be non-empty.** Empty notes are not meaningful. A
-  voice-only note is valid — its `content` is just the single marker.
-- **Capture creates both a Resource and a Note.** Taking a photo or
-  recording a voice memo produces a Resource *and* a minimal Note
-  containing only its marker. This keeps the stream complete and
-  avoids creating orphans at capture time.
-- **Every inline ref must resolve** to a live Resource. Dangling refs
-  are invalid; the `kind` in the marker must match the Resource's
-  `kind`.
-- **Resources should have at least one referencing live Note.**
-  Resources whose referencing notes all become deleted are flagged as
-  orphan cleanup candidates. They are *not* auto-deleted — user
-  reviews and decides.
+  referenced Resources is derived by parsing `content`. Reverse-lookup
+  indexes are a storage concern, not a data-model field.
+- **Content must be non-empty.** A voice-only Note is valid — its
+  `content` is just the single marker.
+- **Capture creates both a Resource and a Note.** Taking a photo
+  produces a Resource and a minimal Note whose `content` is just the
+  marker. Keeps the stream complete and avoids orphans at capture.
+- **Every inline ref must resolve** to a live Resource; the marker
+  `kind` must match the Resource's `kind`.
 - **Resource is minimal; kind-specific data splits by lifecycle.**
-  The Resource record carries only universal fields (id, lifecycle
-  timestamps, `kind`, `mime`, `blob_hash`, `size_bytes`, provenance
-  `meta`) plus an embedded `capture` block. Capture is a
-  typed, 1:1, kind-specific structure holding only what the file
-  itself reveals at upload (dimensions, duration, codec, page
-  count, …) — no AI, no network. Data derived **later** — AI
-  transcripts, OCR, descriptions, embeddings, summaries — lives in
-  separate **Enrichment** records (0..N per Resource), joined by
-  `resource_id`. Capture is embedded because it is tiny, always
-  needed, and immutable after upload; Enrichments are separate
-  because they can be bulky, not always needed, append-only, and
-  grow unboundedly as AI capabilities are added.
-- **Tags are plain strings on the note.** Normalized to lowercase, no
-  hierarchy, free-form. Simple and fast. Added manually by the user
-  or suggested by AI.
-- **Provenance lives in a `meta: dict[str, Any]` bag, not typed
-  fields.** Both `Note` and `Resource` carry a `meta` dict scoped
-  strictly to provenance / capture context: where the record came
-  from, what produced it, context at capture time. `meta` is **not**
-  a general dumping ground — content, annotations, tags, AI outputs,
-  and anything with (or eligible for) its own entity in the model
-  have their own homes and do not go in `meta`. Conventional keys
-  (`source_device`, `generator`, `imported_from`, …) are documented
-  in prose, not typed, so the set can grow without schema changes.
-- **Blobs are content-addressed.** A separate blob store holds file
-  bytes keyed by SHA-256. Resources reference blobs by hash only.
+  Resource carries only universal fields plus an embedded `capture`
+  block (1:1, typed, from the file itself). AI-derived data — OCR,
+  transcripts, descriptions, embeddings — lives in separate
+  **Enrichment** records (0..N, joined by `resource_id`). Capture
+  embedded because it's tiny, always needed, immutable. Enrichments
+  separate because they're bulky, optional, append-only, unbounded.
+- **Resources should have at least one referencing live Note.**
+  When the last referencing Note is deleted, the Resource becomes an
+  **orphan candidate** — flagged for user review, not auto-deleted.
+- **Comments are human-authored text annotations on Notes.** A
+  separate entity (not a Note field, not a `content` edit) so
+  original capture and later reflections keep their own timestamps.
+  Same marker syntax as Note content. Flat, not threaded. Machine
+  annotations are a separate future entity.
+- **Tags on Notes are plain lowercase strings.** No hierarchy,
+  free-form. Added by user or AI.
+- **Provenance lives in a `meta: dict[str, Any]` bag.** Both `Note`
+  and `Resource` carry `meta`, scoped strictly to provenance (where
+  the record came from, what produced it). Not a general dumping
+  ground — content, annotations, tags, and AI outputs have their own
+  homes. Conventional keys documented in the Provenance section.
 
 ## Core entities
 
 ### Note
 
-The user's expression. A single `content` string that interleaves
-plain text with inline references to Resources.
+The user's expression — a `content` string that interleaves plain
+text with inline Resource references.
 
 ```python
 class Note(BaseModel):
@@ -122,25 +84,18 @@ class Note(BaseModel):
     meta: dict[str, Any]  # provenance-only bag; see Provenance metadata below
 ```
 
-Notes are ordered by `created_at` in the stream view (equivalent to
-ordering by `id` thanks to UUIDv7). `updated_at` is the hook a future
-sync mechanism can use for last-writer-wins merge; `deleted_at` is
-the corresponding hook for propagating deletions.
+Stream order is by `created_at` (equivalent to ordering by `id` under
+UUIDv7). `updated_at` and `deleted_at` are the hooks a future sync
+mechanism uses for merge and deletion propagation.
 
 ### Content and inline references
 
-The `content` string is the single source of truth for what the note
-says, what Resources it uses, and in what order. Resources are woven
-into the narrative by reference, not by position in a list.
+`content` is the single source of truth for what the note says, what
+Resources it uses, and in what order.
 
-**Marker syntax** (working choice, see Open Questions):
-
-```
-{{kind:<resource-uuid>}}
-```
-
-Where `kind` is one of `image`, `audio`, `video`, `document`,
-matching the referenced Resource's `kind`. Examples:
+**Marker syntax:** `{{kind:<resource-uuid>}}`, where `kind` is one of
+`image`, `audio`, `video`, `document` and matches the referenced
+Resource's `kind`. Examples:
 
 ```
 Trying a new recipe today {{image:3f1a…}} — smelled great.
@@ -148,30 +103,42 @@ Trying a new recipe today {{image:3f1a…}} — smelled great.
 Test results from today {{document:1d4e…}} will chat with the doctor tomorrow.
 ```
 
-**Invariants:**
+**Invariants:** every marker must resolve to a live Resource; marker
+`kind` must match the Resource's `kind`. Escape rule for literal
+`{{…}}` in text is deferred.
 
-- Every marker in `content` must resolve to a live Resource with the
-  same `id`.
-- `kind` in the marker must match the Resource's `kind`. Mismatch is
-  invalid (protects against accidental wrong-file renders).
+### Comment
 
-**Escaping:** how to include a literal `{{…}}` in text without it
-being parsed as a marker is deferred. Most users will never hit this;
-when they do we add an escape rule.
+Human-authored text annotation on a Note. Separate entity so the
+original capture and later reflections keep their own timestamps
+(rather than appending to `Note.content`).
+
+```python
+class Comment(BaseModel):
+    id: UUID  # UUIDv7
+    note_id: UUID  # FK → Note.id
+    created_at: datetime
+    updated_at: datetime  # last edit; equals created_at if never edited
+    deleted_at: datetime | None  # soft-delete tombstone
+    content: str  # same {{kind:<id>}} marker syntax as Note.content
+    meta: dict[str, Any]  # provenance bag
+```
+
+Human-authored only (no `author` field). Flat, not threaded.
+Machine-produced annotations are a separate future entity.
 
 ### Resource
 
-A file-shaped thing in the user's archive: photo, voice memo, video,
-document. A Resource has identity and a life of its own independent of
-any particular Note — the same Resource can be referenced from many
-Notes (today's entry, a weekly summary, a yearly retrospective).
+A file-shaped thing in the archive: photo, voice memo, video,
+document. Has identity independent of any Note — the same Resource
+can be referenced from many Notes.
 
 ```python
 class Resource(BaseModel):
     id: UUID  # UUIDv7 — used in note markers like {{image:<id>}}
     created_at: datetime  # when the resource was added to the system
     updated_at: datetime  # last time the core record was touched
-    deleted_at: datetime | None  # soft-delete tombstone; None means live
+    deleted_at: datetime | None  # soft-delete tombstone
 
     kind: Literal["image", "audio", "video", "document"]  # coarse class
     mime: str  # authoritative MIME type, e.g. "image/jpeg"
@@ -179,20 +146,15 @@ class Resource(BaseModel):
     size_bytes: int  # file size in bytes
 
     capture: ImageCapture | AudioCapture | VideoCapture | DocumentCapture | None
-    # ^ embedded kind-specific metadata from the file itself; None if unparsable
+    # ^ kind-specific metadata from the file; None if unparsable
 
-    meta: dict[str, Any]  # provenance-only bag; see Provenance metadata below
+    meta: dict[str, Any]  # provenance bag
 ```
-
-The Resource record holds only universal fields plus an embedded
-`capture` block. AI-derived data lives **outside** the Resource, in
-separate Enrichment records (see below).
 
 ### Per-kind capture records
 
-Each capture record carries what the file itself reveals at upload
-time — synchronous, no AI, no network, no user input. One of the four
-types is embedded on a Resource based on its `kind`.
+Embedded on Resource via `capture`, one type per `kind`. Holds only
+what the file reveals at upload — synchronous, no AI, no network.
 
 ```python
 class ImageCapture(BaseModel):
@@ -215,20 +177,17 @@ class DocumentCapture(BaseModel):
     page_count: int | None  # for paginated documents (e.g. PDF)
 ```
 
-If a file cannot be parsed (corrupt header, unknown format),
-`Resource.capture` is `None` and the UI falls back to "unknown" for
-those fields. The Resource itself is still valid — we have its blob,
-its size, its MIME. Capture is best-effort, not an invariant.
-
-`ImageCapture.exif` is intentionally `dict[str, Any]` because EXIF is
-a bag of camera-defined keys whose set we cannot usefully pre-type.
+If parsing fails, `capture` is `None` and the UI falls back to
+"unknown". The Resource is still valid (blob, size, mime exist) —
+capture is best-effort, not an invariant. `ImageCapture.exif` stays
+`dict[str, Any]` because EXIF keys are camera-defined and not worth
+pre-typing.
 
 ### Enrichment
 
-Data derived about a Resource *after* capture — typically by an AI
-pipeline, though manual annotations fit the same shape. Enrichments
-live in their own collection, one record per derived item, joining
-back to Resource via `resource_id`.
+Data derived about a Resource *after* capture — typically by AI.
+Separate collection, one record per derived item, joined by
+`resource_id`.
 
 ```python
 class Enrichment(BaseModel):
@@ -240,139 +199,117 @@ class Enrichment(BaseModel):
     content: dict[str, Any]  # kind-specific payload; shape varies by `kind`
 ```
 
-`content` is deliberately `dict[str, Any]` because the set of
-enrichment kinds will grow as new AI capabilities are added, and each
-has its own natural shape (a transcript has `text` and `language`; an
-embedding has `vector` and `dim`; an OCR result may carry per-page
-text). Pre-typing the full matrix up front would be premature.
-Specific kinds can be promoted to typed sub-models once their shape
-stabilizes and they are read frequently.
+`content` is `dict[str, Any]` because the set of enrichment kinds
+will grow and each has its own natural shape (transcript has `text`
++ `language`; embedding has `vector` + `dim`; OCR may carry per-page
+text). Specific kinds can be promoted to typed sub-models once they
+stabilize.
 
 **Why Enrichments sit beside Resource, not inside it:**
 
-- Stream view (render many Resources as thumbnails) must not pull
-  heavy enrichments like embedding vectors (~6 KB each, several per
-  Resource over time).
-- Resource records stay small and stable; Enrichment count grows per
-  Resource over time as AI capabilities are added.
-- New AI runs are clean INSERTs — no array mutation on Resource
-  under concurrency.
-- Each Enrichment syncs across devices as its own record, not as
-  part of a reshuffled Resource document.
-- Full-text indexes on `content.text` and vector indexes on
-  embeddings live naturally on a dedicated Enrichment collection.
+- The stream view renders many Resources as thumbnails and must not
+  pull heavy enrichments (embedding vectors are ~6 KB each).
+- Each Enrichment syncs across devices as its own record; adding a
+  new AI run is an INSERT, not an array mutation.
+- Full-text and vector indexes live naturally on a dedicated
+  collection.
 
-**Accessing "everything about a Resource":**
-
-When code needs a Resource plus all of its Enrichments (e.g., to
-render a detail view or to feed an AI assistant with context), the
-service layer runs two queries and composes a view object in memory.
-This composite is not persisted — it is a convenience, not an entity.
+To render "everything about a Resource" the service layer runs two
+queries and composes a view object in memory — not persisted, just a
+convenience.
 
 ### Capture and resource lifecycle
 
-- **On capture**, the client creates a Resource *and* a minimal Note
-  whose `content` is just the single marker `{{kind:<resource-id>}}`.
-  The stream always contains every captured thing; orphan Resources
-  only arise later.
-- **Resources may be re-referenced.** When the user writes a later
-  Note, they can include `{{image:<old-resource-id>}}` to weave in a
-  previously captured photo. No copy is made.
-- **Cascade on Note delete.** Soft-deleting a Note has no immediate
-  effect on Resources. A Resource whose every referencing Note is
-  deleted becomes an **orphan candidate**, surfaced to the user for
-  review. Orphans are not auto-deleted.
-- **Temporal interpretation.** `Resource.created_at` is when the file
-  entered the system; `Note.created_at` is when the writing happened.
-  A recent Note may reference an old Resource; UIs must not conflate
-  the two timestamps.
+- **Capture** creates a Resource and a minimal Note whose `content`
+  is just the marker. Stream always contains every captured thing.
+- **Re-reference.** A later Note can include `{{image:<old-id>}}`
+  to weave in a previously captured Resource. No copy is made.
+- **Note delete** does not cascade to Resources. A Resource whose
+  every referencing Note is deleted becomes an orphan candidate —
+  surfaced for user review, not auto-deleted.
+- **Timestamps are distinct.** `Resource.created_at` is when the
+  file entered the system; `Note.created_at` is when the writing
+  happened. UIs must not conflate them.
 
 ### Provenance metadata (`meta`)
 
-Both `Note` and `Resource` carry a `meta: dict[str, Any]` field. It
-is a **provenance bag** and nothing else — a single, flat dictionary
-of optional contextual information about how the record came into
-the system.
+`Note` and `Resource` (and `Comment`) each carry `meta: dict[str, Any]`
+— a flat bag of optional context about *where the record came from*.
+Nothing else goes here: content, tags, annotations, and AI outputs all
+have their own homes.
 
-**Strict scope rule.** `meta` is reserved for provenance / capture
-context. It is **not** a place to store:
+If a field is tempting to put in `meta` but describes *what the record
+is* rather than *where it came from*, it belongs elsewhere.
 
-- Content the user wrote → goes in `Note.content`.
-- Human comments → goes in a `Comment` entity (future).
-- Structured machine analyses → goes in `Annotation` / `Enrichment`.
-- Tags → goes in `tags`.
-- Anything that has, or could reasonably have, its own entity in
-  the model.
+**Conventional keys** (by convention, not typed; absent by default;
+unknown keys ignored so old clients can read newer records):
 
-If a field is tempting to put in `meta` but describes *what the
-record is* rather than *where it came from*, it belongs elsewhere.
-
-**Conventional keys** (documented here, not typed; the list grows
-by convention, not by schema change):
-
-| Key | When present | Example value |
+| Key | When present | Example |
 |---|---|---|
 | `source_device` | Captured on a client device. | `"pixel-8"`, `"macbook-m"` |
-| `generator` | Record was produced by an agent, not a human. | `"health-aggregator-v1"` |
-| `imported_from` | Record came from a bulk import. | `"apple-notes-export-2026-01"` |
-| `client_version` | (future) Client build that created it, useful for bug reports. | `"1.4.2"` |
-| `location` | (future) GPS at capture, if the user opts in. | `{"lat": 55.7, "lon": 37.6}` |
+| `generator` | Produced by an agent, not a human. | `"health-aggregator-v1"` |
+| `imported_from` | Came from a bulk import. | `"apple-notes-export-2026-01"` |
+| `client_version` | (future) Client build, for bug reports. | `"1.4.2"` |
+| `location` | (future) GPS at capture, if user opts in. | `{"lat": 55.7, "lon": 37.6}` |
 
-Any key may be absent. Unknown keys are ignored rather than rejected,
-so an older client can still read records written by a newer one.
-
-**Why a dict and not typed fields.** Provenance is an open-ended set
-of optional signals; most are `None` on most records. Typing each as
-a nullable column clutters the core entity with fields that the hot
-paths never read. A dict keeps the core records tidy and lets new
-provenance signals be added by writing them down here, not by
-altering the schema.
-
-**Trade-off named.** We give up static typing over provenance keys.
-Code that reads `meta["generator"]` is not checked by mypy. This is
-acceptable because provenance is used for UI decoration, filtering,
-and debugging — not for correctness-critical paths. If a specific
-key becomes load-bearing, it can be promoted to a typed field later.
+Static typing over `meta` keys is given up deliberately — provenance
+is used for UI decoration, filtering, and debugging, not
+correctness-critical paths. Hot keys can be promoted to typed fields
+later if needed.
 
 ### Blob (storage concept, not a modeled record)
 
-A blob is just file bytes addressed by their SHA-256 hash. Blobs are
-not a pydantic model because they are not a structured record — they
-live in a separate content-addressed blob store on the filesystem.
-Resources reference blobs exclusively through `Resource.blob_hash`.
-Physical layout (paths, sharding, atomic writes, garbage collection)
-is defined in [`storage.md`](storage.md).
+File bytes addressed by SHA-256. Not a pydantic model — lives in a
+content-addressed blob store on the filesystem, referenced via
+`Resource.blob_hash`. Physical layout is in [`storage.md`](storage.md).
 
-Two consequences worth noting at the data-model level:
-
-- If the same file is added twice (same bytes), the two Resource
-  records both point to the same blob — bytes are deduplicated for
-  free.
-- Deleting a Resource does not delete the blob directly. Blob
-  garbage collection runs separately once no live Resource
-  references a blob.
+- Same bytes → same blob, so dedup is automatic across Resources.
+- Deleting a Resource does not delete the blob. Blob GC runs
+  separately when no live Resource references it.
 
 ## What we are not modeling yet
 
-Deferred to later documents; listed here so we notice what is missing.
+Deferred; listed so nothing goes missing.
 
-- **Sync metadata.** Device IDs, vector clocks, last-sync timestamps,
-  merge journals. The data model leaves hooks (UUIDs, `updated_at`,
-  `deleted_at`) but does not specify a mechanism.
-- **Groups / curated notes.** The vision describes collapsing raw
-  entries into a refined summary. Will be modeled once the flow is
-  understood — candidates include "a note that references other notes"
-  or a dedicated `Group` entity.
+- **Sync metadata.** Device IDs, vector clocks, merge journals. The
+  model leaves hooks (UUIDs, `updated_at`, `deleted_at`) but does
+  not specify a mechanism.
+- **Groups / curated notes.** Collapsing raw entries into a refined
+  summary. Candidates: a Note that references other Notes, or a
+  dedicated `Group` entity.
 - **Sharing state.** Public / password-protected visibility of
-  individual notes. Needs its own record (share links, passwords,
-  expirations).
-- **Enrichment content schemas.** The Enrichment record has a typed
-  shell (`id`, `resource_id`, `kind`, `generator`, `created_at`) and
-  a free-form `content: dict[str, Any]`. The per-kind payload
-  schemas (what fields "transcript" has, what "embedding" looks
-  like, what "ocr" contains) are deliberately deferred until the AI
-  pipelines start running — committing shapes on paper would be
+  individual notes. Needs its own record.
+- **Enrichment content schemas.** Per-kind payloads (what a
+  `transcript` contains, what an `embedding` looks like) are
+  deferred until AI pipelines run; committing shapes now would be
   guessing.
+- **Machine-authored annotations on Notes.** When AI agents attach
+  structured output to a Note (aggregations, trend analysis,
+  extracted facts), that goes in a future `Annotation` entity,
+  probably shaped like:
+
+  ```python
+  class Annotation(BaseModel):
+      id: UUID
+      note_id: UUID                   # FK → Note.id
+      created_at: datetime
+      deleted_at: datetime | None
+      kind: str                       # "health_summary", "aggregation", ...
+      generator: str                  # agent id, typed because identity-level
+      content: dict[str, Any]         # structured payload; shape per kind
+      text: str | None                # optional human-readable preview
+      meta: dict[str, Any]            # provenance bag
+  ```
+
+  Named here so the `Comment` (human) vs. `Annotation` (machine)
+  split is anticipated when the time comes.
+
+- **Agents as registered entities.** Agents that produce
+  `Annotation`s or auto-create Notes will need a registry (id, task,
+  triggers, scope, permissions). The model reserves the signing hooks
+  (`meta["generator"]`; typed `generator` on future `Annotation`);
+  the registry itself is a later concern.
+
 - **Links between notes.** Mentioning another note, quoting it,
   citing a source.
 - **Location metadata** at the note level. Photos already carry EXIF
@@ -382,31 +319,22 @@ Deferred to later documents; listed here so we notice what is missing.
 
 ## Open questions
 
-- **Exact marker syntax.** `{{kind:<uuid>}}` is the working choice.
-  Alternatives worth considering: `[[kind:<uuid>]]` (wiki style),
-  short per-note ids (`{{image:p1}}`) for editable readability instead
-  of raw UUIDs. Final call deferred.
-- **Enrichment cardinality per `(resource_id, kind)`.** Allow many
-  (keep old transcripts side-by-side when regenerated with a newer
-  model, for comparison) or enforce "latest wins"? The record shape
-  supports both; policy is deferred.
-- **Fallback `kind`** for files that aren't image / audio / video /
-  document (spreadsheets, text files, archives, unknown binaries).
-  Add a catch-all `"file"` kind with a minimal capture, or reject
-  unknown formats at upload? The current four are committed; the
-  fallback is open.
-- **Escape rule** for writing a literal `{{…}}` in `content`. Rare
-  case; postpone until someone hits it.
-- Should **content** support lightweight markup (markdown) within the
-  text parts? Captures are often quick, and formatting discourages
-  speed.
-- Should **tags** be entity-level (a normalized set shared across the
-  user's data, with rename/merge) or purely note-local strings that
-  aggregate by convention?
-- When a note is **edited**, do we keep **edit history** or only the
-  latest state? Simpler: latest-only. Richer: a journal.
-- Should a **note carry a location** (captured lat/lon) as a
-  first-class optional field, given photos already have it in EXIF?
-- How do we handle **very large Resources** (hours of video, scans
-  of hundreds of pages)? Probably the same model, but worth naming as
-  a stress case before committing to a blob strategy.
+- **Marker syntax.** `{{kind:<uuid>}}` is the working choice.
+  Alternatives: `[[kind:<uuid>]]` (wiki), short per-note ids
+  (`{{image:p1}}`) for readability.
+- **Enrichment cardinality per `(resource_id, kind)`.** Many (keep
+  old transcripts for comparison) or latest-wins? Shape supports
+  both.
+- **Fallback `kind`** for files outside image/audio/video/document
+  (spreadsheets, archives, unknown binaries). Catch-all `"file"`
+  kind or reject at upload?
+- **Escape rule** for literal `{{…}}` in `content`. Postpone.
+- **Markdown** in `content` — allow, or stay plain? Formatting can
+  slow down capture.
+- **Tags** — note-local strings (simple) or entity-level with
+  rename/merge (richer)?
+- **Edit history** on Notes — latest-only (simple) or full journal?
+- **Location** (lat/lon) at the Note level — promote to first-class
+  field, or leave it to EXIF on photos?
+- **Very large Resources** (hours of video, hundred-page scans) —
+  same model or a chunking scheme?
